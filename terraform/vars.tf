@@ -8,3 +8,8 @@ variable "availability_zone" {
   type        = string
   description = "availability zone for subnet"
 }
+
+variable "region" {
+  type = string
+  description = "aws region"
+}
