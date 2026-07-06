@@ -9,8 +9,8 @@ resource "aws_vpc" "kubing" {
 }
 
 resource "aws_subnet" "kubing" {
-  vpc_id = aws_vpc.kubing.id
-  cidr_block = "10.42.1.0/24"
+  vpc_id                  = aws_vpc.kubing.id
+  cidr_block              = "10.42.1.0/24"
   availability_zone       = var.availability_zone
   map_public_ip_on_launch = true
 
@@ -48,9 +48,9 @@ resource "aws_route_table_association" "kubing" {
 }
 
 resource "aws_security_group" "kubing" {
-  name = "kubing_sg"
+  name        = "kubing_sg"
   description = "inbound tcp from operator ip, inbound any any from inside sg, outbound any any"
-  vpc_id = aws_vpc.kubing.id
+  vpc_id      = aws_vpc.kubing.id
 
   tags = {
     Name = "kubing_security_group"
@@ -66,9 +66,9 @@ resource "aws_vpc_security_group_ingress_rule" "allow_ssh" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "allow_internal" {
-  security_group_id = aws_security_group.kubing.id
+  security_group_id            = aws_security_group.kubing.id
   referenced_security_group_id = aws_security_group.kubing.id
-  ip_protocol = "-1"
+  ip_protocol                  = "-1"
 }
 
 resource "aws_vpc_security_group_egress_rule" "allow_all_traffic_ipv4" {
