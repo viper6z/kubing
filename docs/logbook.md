@@ -87,4 +87,121 @@ Alternatively, if you are the root user, you can run:
 
   export KUBECONFIG=/etc/kubernetes/admin.conf
 
+## 2026-07-08 — AWS foundation rebuild validated
+
+Rebuilt the Kubing AWS foundation from Terraform after a full destroy.
+
+New node IPs for this run:
+
+* control-plane: public `16.171.55.14`, private `10.42.1.181`
+* worker-1: public `13.49.246.191`, private `10.42.1.34`
+* worker-2: public `16.170.143.13`, private `10.42.1.162`
+
+Validation done:
+
+* SSH from WSL to all three Ubuntu nodes works.
+* Private node-to-node networking inside `10.42.1.0/24` works.
+* Outbound internet works on all nodes.
+* `apt update` works on all nodes.
+
+Decision: AWS foundation is ready for Day 0 Kubernetes bootstrap. Keep Kubernetes setup manual for now and document the path before turning it into a golden path later.
+
+Cleanup note: this run creates live EC2 instances, so destroy them when finished with the lab session if I am not continuing.
+
+Used my bootstrap runbook and Kubernetes docs to prepare the nodes again.
+
+Created `scripts/validate-node.sh` as a small pre-check before `kubeadm init` / `kubeadm join`. It checks things like swap, IPv4 forwarding, containerd, and Kubernetes tools. It caught one real issue where IPv4 forwarding was not enabled on one node. kubeadm still has its own preflight checks, so the script is only a quick sanity check.
+
+Ran `kubeadm init` on the control-plane node. kubeadm selected the private API server address `10.42.1.181`.
+
+Configured `kubectl` for the `ubuntu` user with `/etc/kubernetes/admin.conf`.
+
+Before installing Cilium:
+
+* control-plane node was `NotReady`
+* CoreDNS was `Pending`
+* API server, etcd, scheduler, controller-manager, and kube-proxy were `Running`
+* `kubectl describe node` showed `cni plugin not initialized`
+
+Installed Helm on the control-plane node.
+
+Copied the Cilium `values.yaml` file to the control-plane node with `scp`.
+
+Installed Cilium `1.19.5` with Helm:
+
+```bash
+helm repo add cilium https://helm.cilium.io/
+helm repo update
+
+helm install cilium cilium/cilium \
+  --version 1.19.5 \
+  --namespace kube-system \
+  --values ~/cilium/values.yaml
+```
+
+After installing Cilium:
+
+* control-plane node became `Ready`
+* CoreDNS became `Running`
+* Cilium agent was `Running`
+* one Cilium operator pod was `Running`
+* one Cilium operator pod was `Pending` because there is only one node right now
+* CoreDNS got Pod IPs from `172.20.0.0/16`
+
+Current technical debt:
+
+* kubeadm init is manual
+* Cilium install is manual
+* kubeadm defaults were used instead of a config file
+
+Used this to print the command used by worker to join cluster:
+ sudo kubeadm token create --print-join-command
+
+Joined both worker nodes with `kubeadm join`.
+
+Validation after joining workers:
+
+* all three nodes are `Ready`
+* control-plane: `10.42.1.181`
+* worker-1: `10.42.1.34`
+* worker-2: `10.42.1.162`
+* all nodes are running Kubernetes `v1.36.2`
+* all nodes are using `containerd`
+
+Cilium after workers joined:
+
+* one Cilium agent pod is running on each node
+* one kube-proxy pod is running on each node
+* both Cilium operator pods are now `Running`
+* the operator pod that was previously `Pending` could schedule after worker nodes joined
+
+Current cluster state:
+
+* kubeadm control plane is up
+* Cilium CNI is installed and working
+* all three EC2 nodes have joined the cluster
+* system pods are running
+* cluster is ready for a small workload scheduling test
+
+Security note:
+
+* kubeadm join tokens should not be pasted into chat, Git, or docs
+* exposed or unused join tokens should be deleted with `sudo kubeadm token delete <token-id>`
+
+Created a temporary `lab-test` namespace with a 3-replica HTTP echo Deployment.
+
+The echo Pods scheduled onto the worker nodes and received Cilium Pod IPs:
+
+* `172.20.1.x` on worker-1
+* `172.20.2.x` on worker-2
+
+Created a `ClusterIP` Service named `echo`. The Service got a cluster-internal IP and an EndpointSlice with all three echo Pod IPs.
+
+Tested the Service from a temporary curl Pod inside the cluster. `curl http://echo` returned `hello from kubing`, confirming in-cluster DNS, Service routing, and Pod-to-Pod networking.
+
+Deleted one echo Pod manually. Kubernetes created a replacement Pod automatically and returned the Deployment to 3 running replicas.
+
+Decision: workload scheduling, internal Service networking, and basic self-healing behavior are validated.
+
+
 
