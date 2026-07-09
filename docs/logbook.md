@@ -203,5 +203,15 @@ Deleted one echo Pod manually. Kubernetes created a replacement Pod automaticall
 
 Decision: workload scheduling, internal Service networking, and basic self-healing behavior are validated.
 
+## 2026-07-09
+Today im starting writing some ansible stuff to automate the whole sequence post-terraform deploy that gets the cluster up and running.
+
+Made a inventory file, then did a ping to all my nodes, the command needed some work though, i needed to specify the user ubuntu and i also needed to pass the ssh arg --ssh-common-args='-o StrictHostKeyChecking=accept-new' so that i automaticlly trust first time hosts. 
+
+Also gonna add this to my vars so that its easier in the future:
+[all:vars]
+ansible_user=ubuntu
+ansible_python_interpreter=/usr/bin/python3.12
+ansible_ssh_common_args='-o StrictHostKeyChecking=accept-new'
 
 
