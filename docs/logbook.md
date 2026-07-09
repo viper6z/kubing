@@ -214,4 +214,14 @@ ansible_user=ubuntu
 ansible_python_interpreter=/usr/bin/python3.12
 ansible_ssh_common_args='-o StrictHostKeyChecking=accept-new'
 
+Kubernetes networking. The playbook writes /etc/sysctl.d/k8s.conf with net.ipv4.ip_forward = 1, then runs sysctl --system to apply it.
+
+Validated it with:
+
+ansible nodes -i inventory.ini -m ansible.builtin.command -a "sysctl net.ipv4.ip_forward"
+
+All three nodes returned:
+
+net.ipv4.ip_forward = 1
+
 
