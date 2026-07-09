@@ -224,4 +224,35 @@ All three nodes returned:
 
 net.ipv4.ip_forward = 1
 
+## 2026-07-10
+Got the first real Ansible bootstrap playbook working. It now handles the node prep that I previously did manually after Terraform creates the EC2 instances.
+
+The playbook currently does:
+
+```text id="cu94fl"
+enable IPv4 forwarding
+set up Docker apt repo
+install containerd
+generate containerd config
+set SystemdCgroup = true
+restart and enable containerd
+set up Kubernetes v1.36 apt repo
+install kubelet, kubeadm, and kubectl
+hold the Kubernetes packages
+enable/start kubelet
+```
+
+This is now the first proper step toward making the cluster rebuildable after `terraform apply`, while still keeping kubeadm init/join and Cilium install manual for now.
+
+Some Ansible lessons from this step:
+
+```text id="ni94sy"
+become: true replaces putting sudo everywhere
+apt/file/get_url/deb822_repository/systemd modules are better than huge shell blocks
+gather_facts is needed here because the playbook uses Ubuntu release and architecture facts
+blocks are useful for grouping related tasks like containerd setup and Kubernetes package setup
+```
+
+Known cleanup for later: the containerd config generation currently works, but it is not perfectly idempotent because it regenerates `/etc/containerd/config.toml`. Good enough for v0, but should be cleaned up later.
+
 
