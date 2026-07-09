@@ -16,6 +16,123 @@
       ansible.builtin.command: sysctl --system
       changed_when: false
 
+    - name: set up docker apt repo and containerd
+      block:
+        - name: install prereq packages
+          ansible.builtin.apt:
+            name: 
+              - ca-certificates
+              - curl
+            update_cache: true
+        
+        - name: create apt keyrings dir
+          ansible.builtin.file:
+            mode: '0755'
+            path: /etc/apt/keyrings/
+            state: directory
 
+        - name: download docker gpg key
+          ansible.builtin.get_url:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            dest: /etc/apt/keyrings/docker.asc
+            mode: '0644'
 
+        - name: add docker to to apt resources
+          ansible.builtin.deb822_repository:
+            name: docker
+            types: [deb]
+            uris: [https://download.docker.com/linux/ubuntu]
+            suites: ["{{ ansible_distribution_release }}"]
+            components: [stable]
+            architectures: ["{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"]
+            signed_by: /etc/apt/keyrings/docker.asc
+            state: present
 
+        - name: apt get update
+          ansible.builtin.apt:
+            update_cache: true
+
+        - name: install containerd package 
+          ansible.builtin.apt:
+            name:
+              - containerd.io
+            update_cache: true
+
+    - name: configure containerd and cgroup driver
+      block:
+        - name: create containerd conf dir if it doesnt exist
+          ansible.builtin.file:
+            path: /etc/containerd
+            state: directory
+            mode: '0755'
+
+        - name: Generate default containerd configuration
+          ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+          changed_when: false
+
+        - name: Configure systemd cgroup driver
+          ansible.builtin.replace:
+            path: /etc/containerd/config.toml
+            regexp: 'SystemdCgroup = false'
+            replace: 'SystemdCgroup = true'
+
+        - name: Restart and enable containerd service
+          ansible.builtin.systemd:
+            name: containerd
+            state: restarted
+            enabled: true
+      
+    - name: install kubernetes components
+      block:
+        - name: install k8s prereq packages
+          ansible.builtin.apt:
+            name:
+              - apt-transport-https
+              - ca-certificates
+              - curl
+              - gpg
+            update_cache: true
+
+        - name: create apt keyrings dir
+          ansible.builtin.file:
+            mode: '0755'
+            path: /etc/apt/keyrings/
+            state: directory
+
+        - name: download kubernetes signing key
+          ansible.builtin.get_url:
+            url: https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key
+            dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+            mode: '0644'
+
+        - name: add kubernetes apt repository
+          ansible.builtin.deb822_repository:
+            name: kubernetes
+            types: [deb]
+            uris: [https://pkgs.k8s.io/core:/stable:/v1.36/deb/]
+            suites: [/]
+            signed_by: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+            state: present
+
+        - name: apt get update and install k8s packages
+          ansible.builtin.apt:
+            name:
+              - kubelet
+              - kubeadm
+              - kubectl
+            update_cache: true
+
+        - name: hold k8s packages at their current version
+          ansible.builtin.dpkg_selections:
+            name: "{{ item }}"
+            selection: hold
+          loop:
+            - kubelet
+            - kubeadm
+            - kubectl
+
+        - name: enable and start kubelet
+          ansible.builtin.systemd:
+            name: kubelet
+            enabled: true
+            state: started
