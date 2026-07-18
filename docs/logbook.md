@@ -255,4 +255,26 @@ blocks are useful for grouping related tasks like containerd setup and Kubernete
 
 Known cleanup for later: the containerd config generation currently works, but it is not perfectly idempotent because it regenerates `/etc/containerd/config.toml`. Good enough for v0, but should be cleaned up later.
 
+## 2026-07-18 — Kubeadm cluster networking and workload fundamentals
+
+Installed Cilium as the cluster CNI using Helm and a custom `values.yaml`. Confirmed the kubeadm control-plane components, CoreDNS, kube-proxy, Cilium agents, Envoy and Cilium operators were running across the three nodes.
+
+Built a clearer mental model of cluster networking: Pods receive their own IP addresses, and Cilium handles Pod-to-Pod communication across nodes. Cross-node traffic may be encapsulated inside node-to-node traffic, while eBPF allows Cilium to intercept and redirect packets efficiently inside the Linux networking path.
+
+Reviewed the core control-plane roles:
+
+* etcd stores Kubernetes cluster state under `/var/lib/etcd`.
+* Controllers continuously reconcile observed status toward the desired spec.
+* Nodes without the control-plane role operate as workers.
+
+Worked with Kubernetes workload concepts:
+
+* Jobs run finite work until completion.
+* CronJobs create Jobs on a schedule.
+* Services provide a stable entry point to changing Pod replicas.
+* Liveness probes detect when a container should be restarted.
+* Readiness probes determine whether a Pod should receive traffic.
+* ConfigMaps and Secrets provide configuration outside the container image.
+
+Deployed Podinfo and tested application failure behavior using its panic and delay endpoints. Inspected environment variables inside a Pod and practiced basic cluster inspection with `kubectl get nodes`, `kubectl get pods` and `kubectl get pods -n kube-system`.
 
