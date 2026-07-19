@@ -17,7 +17,7 @@ metadata:
   name: db-secret
   namespace: freshrss
 data:
-  POSTGRES_PASSWORD: placeholder
+  POSTGRES_PASSWORD:
 ---
 apiVersion: apps/v1
 kind: Deployment
