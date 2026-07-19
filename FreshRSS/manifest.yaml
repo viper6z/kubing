@@ -115,7 +115,7 @@ kind: Deployment
 metadata:
   name: postgres
   namespace: freshrss
-spec: 
+spec:
   replicas: 1
   selector:
     matchLabels:
@@ -129,22 +129,22 @@ spec:
       - name: postgres-storage
         persistentVolumeClaim:
           claimName: postgres-data
-        containers:
-        - name: postgres
-          image: postgres:15-alpine
-          ports:
-            - containerPort: 5432
-          volumeMounts:
-            - name: postgres-storage # This must match the name below
-              mountPath: "/var/lib/postgresql/data"
-          env:
-            - name: POSTGRES_DB
-              value: "freshrss"
-            - name: POSTGRES_USER
-              value: "freshrss"
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: db-secret
-                  key: POSTGRES_PASSWORD
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+          - containerPort: 5432
+        volumeMounts:
+          - name: postgres-storage # This must match the name below
+            mountPath: "/var/lib/postgresql/data"
+        env:
+          - name: POSTGRES_DB
+            value: "freshrss"
+          - name: POSTGRES_USER
+            value: "freshrss"
+          - name: POSTGRES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: db-secret
+                key: POSTGRES_PASSWORD
 
