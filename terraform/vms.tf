@@ -8,7 +8,6 @@ resource "aws_instance" "control_plane" {
   subnet_id              = aws_subnet.kubing.id
   vpc_security_group_ids = [aws_security_group.kubing.id]
   key_name               = aws_key_pair.kubing.key_name
-
   root_block_device {
     volume_size           = 20
     volume_type           = "gp3"
@@ -27,7 +26,7 @@ resource "aws_instance" "worker_1" {
   subnet_id              = aws_subnet.kubing.id
   vpc_security_group_ids = [aws_security_group.kubing.id]
   key_name               = aws_key_pair.kubing.key_name
-
+  iam_instance_profile = aws_iam_instance_profile.worker.name
   root_block_device {
     volume_size           = 20
     volume_type           = "gp3"
@@ -46,6 +45,7 @@ resource "aws_instance" "worker_2" {
   subnet_id              = aws_subnet.kubing.id
   vpc_security_group_ids = [aws_security_group.kubing.id]
   key_name               = aws_key_pair.kubing.key_name
+  iam_instance_profile = aws_iam_instance_profile.worker.name
 
   root_block_device {
     volume_size           = 20
