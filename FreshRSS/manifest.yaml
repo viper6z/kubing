@@ -30,7 +30,7 @@ spec:
     spec:
       containers:
       - name: freshrss
-        image: ghcr.io/freshrss/freshrss:1.28.1
+        image: ghcr.io/freshrss/freshrss:latest
         ports:
         - containerPort: 80
         resources:
@@ -51,7 +51,7 @@ spec:
         - name: DB_HOST
           value: "postgres"
         - name: DB_PORT
-          value: 5432
+          value: "5432"
         - name: DB_USER
           value: "freshrss"
         - name: DB_NAME
@@ -138,6 +138,8 @@ spec:
           - name: postgres-storage # This must match the name below
             mountPath: "/var/lib/postgresql/data"
         env:
+          - name: PGDATA  # <--- THIS IS THE MISSING KEY
+            value: "/var/lib/postgresql/data/pgdata"
           - name: POSTGRES_DB
             value: "freshrss"
           - name: POSTGRES_USER

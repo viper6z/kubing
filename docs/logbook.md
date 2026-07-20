@@ -301,3 +301,64 @@ todo for next time:
 
     fix the typos in manifest and put the namespace direct in the yaml so i dont have to do it by hand again
 
+## 2026-07-20 
+Today I installed the AWS EBS CSI Driver into my kubeadm Kubernetes cluster using Helm:
+
+- Added the AWS EBS CSI Driver Helm repository
+- Installed the driver into the `kube-system` namespace
+- Investigated why the EBS CSI node pods were crashing
+
+The issue turned out to be related to AWS Instance Metadata Service (IMDS) connectivity. The EBS CSI driver needs access to IMDS to discover information about the EC2 instance it is running on.
+
+The EC2 instances already had:
+
+```text
+HttpPutResponseHopLimit: 2
+
+but the pods still could not reach IMDS. The packet path was effectively:
+
+Pod -> Cilium -> Node -> IMDS
+
+which required another hop than expected. Increasing the hop limit to 3 allowed the EBS CSI driver pods to successfully query IMDS and they started running correctly.
+
+I considered rebuilding the cluster with AWS Cloud Controller Manager (CCM), but after investigating the actual issue it was only an IMDS hop limit problem.
+
+Cluster Rebuild / Cilium Setup
+
+I reset the kubeadm cluster while troubleshooting:
+
+sudo kubeadm reset -f
+sudo rm -rf /etc/cni/net.d
+sudo rm -rf $HOME/.kube/config
+
+After rebuilding:
+
+Reinstalled Cilium CNI
+Verified cluster networking
+Confirmed the AWS EBS CSI driver was healthy after increasing the IMDS hop limit
+PostgreSQL Persistent Storage Issue
+
+While deploying PostgreSQL, I hit a storage initialization issue.
+
+The container failed because the mounted volume was not empty. Linux automatically creates a lost+found directory when formatting filesystems, which caused PostgreSQL initialization to fail.
+
+The solution was not to change the volumeMount path, since it needs to reference the actual mounted partition. Instead, PostgreSQL was configured to use a different data directory through:
+
+PGDATA=/absolute/path/to/subdirectory
+
+This allowed PostgreSQL to initialize successfully while keeping the underlying volume mount unchanged.
+
+## Next Step
+
+The next task is figuring out how to expose FreshRSS securely.
+
+The goal is to make the FreshRSS service reachable externally, but only from my own IP address.
+
+The planned approach is to investigate:
+
+- How to expose the FreshRSS workload outside the cluster
+- Whether to use Kubernetes Ingress or another exposure method
+- How to restrict access at the AWS VPC/networking layer using IP-based rules
+- How Kubernetes Services, Ingress resources, and AWS security controls interact
+
+The target setup is a "public" FreshRSS endpoint from Kubernetes' perspective, but restricted so only my own IP can access it.
