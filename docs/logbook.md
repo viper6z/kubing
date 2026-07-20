@@ -278,3 +278,26 @@ Worked with Kubernetes workload concepts:
 
 Deployed Podinfo and tested application failure behavior using its panic and delay endpoints. Inspected environment variables inside a Pod and practiced basic cluster inspection with `kubectl get nodes`, `kubectl get pods` and `kubectl get pods -n kube-system`.
 
+## 2026-07-20
+tried to deploy freshrss and postgres to my aws k8s node today. first i had this problem with the db password. i just ended up making a local secret.yaml and applied it on the vm and put it in gitignore so it doesnt go in the repo. gonna fix sealed secrets later when i do gitops for real.
+
+had some stupid k8s problems when doing it:
+
+    forgot to make the freshrss namespace before applying
+
+    api complained because i didnt put quotes around 5432 so it thought it was a number
+
+    got imagepullbackoff on freshrss since 1.28.1 tag is dead i guess. changed to latest.
+
+got the pods to start but the db pvc was just stuck on pending. looked at the events and realized i forgot to install the aws ebs csi driver. so k8s couldnt even talk to aws to make the disk.
+
+decided to just quit for today instead of doing some ugly local disk hack.
+
+todo for next time:
+
+    fix terraform so it gives AmazonEBSCSIDriverPolicy to the node iam role
+
+    add helm in tf so it installs the ebs csi driver automatic
+
+    fix the typos in manifest and put the namespace direct in the yaml so i dont have to do it by hand again
+
