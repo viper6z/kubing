@@ -314,7 +314,7 @@ The EC2 instances already had:
 
 ```text
 HttpPutResponseHopLimit: 2
-
+```
 but the pods still could not reach IMDS. The packet path was effectively:
 
 Pod -> Cilium -> Node -> IMDS
@@ -362,3 +362,72 @@ The planned approach is to investigate:
 - How Kubernetes Services, Ingress resources, and AWS security controls interact
 
 The target setup is a "public" FreshRSS endpoint from Kubernetes' perspective, but restricted so only my own IP can access it.
+
+# Logbook, 2026-07-21: Exposing FreshRSS to my PC only
+
+**Goal:** get FreshRSS reachable over HTTP from my PC, and only my PC.
+
+## Attempt 1: NGINX Ingress
+Planned `hostNetwork` NGINX bound to port 80. Scrapped before installing. Cilium already ships its own Envoy-based ingress, no reason to run two ingress stacks.
+
+## Attempt 2: Cilium Ingress, NodePort mode
+```yaml
+ingressController:
+  enabled: true
+  default: true
+  loadbalancerMode: shared
+  service:
+    type: NodePort
+    insecureNodePort: 32080
+```
+`helm upgrade --reuse-values` left the cluster in a broken state. Fixed by nuking Cilium and doing a clean `helm install -f values.yaml` instead.
+
+## Detour: considered AWS LB Controller / CCM
+Would mean Terraform: IAM roles for the controller, node instance profiles, subnet tagging. Decided it's overkill for a single-user endpoint, went back to fixing Cilium's own ingress instead.
+
+## Attempt 3: root cause found, working config
+Two things were actually broken the whole time:
+1. **`kubeProxyReplacement` was never enabled.** Cilium's ingress relies on eBPF/TPROXY interception, which requires Cilium (not kube-proxy) owning service routing.
+2. **`loadbalancerMode` was left at the default (`dedicated`)** while trying to use a shared hostNetwork port — so `sharedListenerPort` was never actually applied.
+
+Final `values.yaml`:
+```yaml
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 172.20.0.0/16
+    clusterPoolIPv4MaskSize: 24
+kubeProxyReplacement: true
+l7Proxy: true
+ingressController:
+  enabled: true
+  default: true
+  loadbalancerMode: shared
+  hostNetwork:
+    enabled: true
+    sharedListenerPort: 32080
+envoy:
+  enabled: true
+```
+```
+helm upgrade cilium cilium/cilium --namespace kube-system -f values.yaml
+kubectl -n kube-system rollout restart deployment/cilium-operator
+kubectl -n kube-system rollout restart ds/cilium
+```
+
+## Verification
+- `cilium status` → kube-proxy replacement active
+- `ss -tulpn | grep 32080` on node → Envoy listening on `0.0.0.0:32080`
+- `curl http://localhost:32080/` on node → 302 from FreshRSS, `server: envoy`. Full path confirmed working
+- Opened EC2 security group: TCP 32080, source = my IP only
+- `curl` from my PC → same 302
+- Firefox `https://` → `PR_CONNECT_RESET_ERROR` (no TLS configured) — fixed by using `http://` explicitly
+
+## Result
+FreshRSS reachable from my PC only, via Cilium's built-in Envoy ingress. No NGINX, no ALB. TLS is a follow-up if I want it later.
+
+## Takeaways
+- An `Ingress` object is just declarative config in etcd. Envoy is the actual running process; the Ingress tells it what to do, it doesn't listen for anything itself
+- `hostNetwork` binds Envoy straight to the node's real interface, bypassing the pod network
+- Cilium's ingress needs kube-proxy replacement specifically because of how it intercepts traffic, not true of bolt-on controllers like nginx
