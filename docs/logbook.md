@@ -431,3 +431,55 @@ FreshRSS reachable from my PC only, via Cilium's built-in Envoy ingress. No NGIN
 - An `Ingress` object is just declarative config in etcd. Envoy is the actual running process; the Ingress tells it what to do, it doesn't listen for anything itself
 - `hostNetwork` binds Envoy straight to the node's real interface, bypassing the pod network
 - Cilium's ingress needs kube-proxy replacement specifically because of how it intercepts traffic, not true of bolt-on controllers like nginx
+
+  # Logbook – 2026-07-21
+
+## Remote Cluster Administration
+
+Today I configured remote administration of my Kubernetes cluster from my laptop.
+
+I exported the Kubernetes client configuration (`kubeconfig`) and certificates from the control plane, configured them locally, and verified that I could successfully interact with the cluster using `kubectl`.
+
+This allows me to manage the cluster directly from my development machine instead of SSHing into the control plane for every administrative task.
+
+---
+
+## Cluster-Wide DNS Outage
+
+While continuing work on the cluster, I encountered a cluster-wide DNS outage. Pods across the cluster were unable to resolve DNS names, which caused several workloads and infrastructure components to fail.
+
+As part of the initial troubleshooting, I restarted both CoreDNS and the Cilium DaemonSet:
+
+```bash
+kubectl rollout restart deployment coredns -n kube-system
+kubectl rollout restart daemonset cilium -n kube-system
+```
+
+Although this refreshed the networking components, it did not resolve the underlying issue.
+
+---
+
+## Root Cause Analysis
+
+The issue was ultimately caused by a conflict between **Cilium** and **kube-proxy**.
+
+Both components were managing Kubernetes Service routing at the same time. Since Service routing is responsible for directing traffic to ClusterIP Services—including the CoreDNS Service—this conflict prevented pods from reaching the DNS server.
+
+Without DNS, workloads throughout the cluster were unable to communicate with required services, leading to failures across multiple components, including:
+
+- CoreDNS
+- Hubble
+- AWS EBS CSI Driver
+- Other workloads depending on cluster DNS
+
+After identifying the networking conflict, it became clear that Cilium and kube-proxy were both programming the Service datapath, resulting in broken Service routing.
+
+---
+
+## Key Takeaways
+
+- Configured secure remote cluster administration using a local kubeconfig.
+- Gained experience troubleshooting a cluster-wide networking outage.
+- Learned how Kubernetes Service routing underpins critical cluster functionality such as DNS.
+- Improved my understanding of Cilium's kube-proxy replacement mode and how it interacts with the Kubernetes networking stack.
+- Observed how a Service routing failure can cascade into failures across many cluster components.
