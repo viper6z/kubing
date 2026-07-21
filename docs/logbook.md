@@ -432,17 +432,13 @@ FreshRSS reachable from my PC only, via Cilium's built-in Envoy ingress. No NGIN
 - `hostNetwork` binds Envoy straight to the node's real interface, bypassing the pod network
 - Cilium's ingress needs kube-proxy replacement specifically because of how it intercepts traffic, not true of bolt-on controllers like nginx
 
-  # Logbook – 2026-07-21
+# Logbook, 2026-07-21 (continued)
 
 ## Remote Cluster Administration
 
 Today I configured remote administration of my Kubernetes cluster from my laptop.
-
 I exported the Kubernetes client configuration (`kubeconfig`) and certificates from the control plane, configured them locally, and verified that I could successfully interact with the cluster using `kubectl`.
-
 This allows me to manage the cluster directly from my development machine instead of SSHing into the control plane for every administrative task.
-
----
 
 ## Cluster-Wide DNS Outage
 
@@ -450,36 +446,58 @@ While continuing work on the cluster, I encountered a cluster-wide DNS outage. P
 
 As part of the initial troubleshooting, I restarted both CoreDNS and the Cilium DaemonSet:
 
-```bash
+```
 kubectl rollout restart deployment coredns -n kube-system
 kubectl rollout restart daemonset cilium -n kube-system
 ```
 
 Although this refreshed the networking components, it did not resolve the underlying issue.
 
----
+### Root Cause Analysis
 
-## Root Cause Analysis
-
-The issue was ultimately caused by a conflict between **Cilium** and **kube-proxy**.
-
-Both components were managing Kubernetes Service routing at the same time. Since Service routing is responsible for directing traffic to ClusterIP Services—including the CoreDNS Service—this conflict prevented pods from reaching the DNS server.
+The issue was ultimately caused by a conflict between Cilium and kube-proxy.
+Both components were managing Kubernetes Service routing at the same time. Since Service routing is responsible for directing traffic to ClusterIP Services, including the CoreDNS Service, this conflict prevented pods from reaching the DNS server.
 
 Without DNS, workloads throughout the cluster were unable to communicate with required services, leading to failures across multiple components, including:
 
-- CoreDNS
-- Hubble
-- AWS EBS CSI Driver
-- Other workloads depending on cluster DNS
+* CoreDNS
+* Hubble
+* AWS EBS CSI Driver
+* Other workloads depending on cluster DNS
 
-After identifying the networking conflict, it became clear that Cilium and kube-proxy were both programming the Service datapath, resulting in broken Service routing.
+## Remote Access Hardening: Tailscale
 
----
+Replaced the ad hoc SSH tunnel used for remote kubectl access with a permanent Tailscale overlay network, installed on both the node and the laptop. This removes the need to keep a tunnel process alive per session.
+
+Hit a real debugging detour getting there:
+
+* A stale local kubeconfig produced `401 Unauthorized` responses even though the client certificate was not expired.
+* Traced with `openssl verify -CAfile ca.crt client.crt`, confirmed the client cert was signed by a CA that no longer matched the cluster's current trusted CA.
+* Root cause was a leftover `KUBECONFIG` environment variable pointing at an old file from earlier in the session, silently shadowing the correct, freshly pulled config at the default path. `KUBECONFIG` takes priority over `~/.kube/config` and is scoped per shell, so it stayed wrong in one terminal even after being fixed in another.
+* Also hit a near miss editing a decoy file (`~/kube/config` instead of `~/.kube/config`), one missing dot, different directory entirely.
+* Fixed by pulling a fresh `admin.conf`, verifying it against the cluster's live CA before editing anything, and standardizing on the default `~/.kube/config` path so no env var is required going forward.
+
+## Completing the kube-proxy Migration
+
+Enabling `kubeProxyReplacement: true` and removing kube-proxy's DaemonSet and ConfigMap surfaced a second, separate failure from the DNS outage above: `cilium-operator` went into `CrashLoopBackOff` and every `cilium-agent` pod reported `Unknown`.
+
+Root cause: both the operator and the agent need to reach the Kubernetes API server as one of their first startup actions, but the API server sits behind a ClusterIP (`10.96.0.1`), and that ClusterIP only resolves once Cilium's own eBPF datapath is actually programmed. With kube-proxy gone, nothing else could translate that address, and Cilium couldn't bootstrap far enough to become the thing doing the translating. A dependency loop that never existed while kube-proxy handled Service routing as an independent process.
+
+Fixed by setting `k8sServiceHost` and `k8sServicePort` in the Helm values, pointing Cilium's agent and operator directly at the control-plane's real IP so they can start without relying on Service routing that doesn't exist yet. Followed by a per-node iptables cleanup (`iptables-save | grep -v KUBE | iptables-restore`) to remove stale rules left behind by kube-proxy.
+
+## Configuration in Git
+
+Checked the working Cilium Helm values into git as `values.yaml` plus a `README.md`. Not GitOps yet, just a documented, reviewable source of truth with a manual drift-check procedure (`helm get values cilium -n kube-system -a | diff` against the committed file).
 
 ## Key Takeaways
 
-- Configured secure remote cluster administration using a local kubeconfig.
-- Gained experience troubleshooting a cluster-wide networking outage.
-- Learned how Kubernetes Service routing underpins critical cluster functionality such as DNS.
-- Improved my understanding of Cilium's kube-proxy replacement mode and how it interacts with the Kubernetes networking stack.
-- Observed how a Service routing failure can cascade into failures across many cluster components.
+* Configured secure remote cluster administration using a local kubeconfig, later hardened with Tailscale instead of a manual SSH tunnel.
+* Learned how Kubernetes Service routing underpins critical cluster functionality such as DNS, and observed how a Service routing failure cascades into failures across many unrelated-looking components.
+* `KUBECONFIG` shadows the default config path and is scoped per shell. A stale value can silently point kubectl at an outdated file for an entire debugging session.
+* A client certificate can be valid and unexpired and still fail authentication if it was signed by a CA that no longer matches the cluster's trusted CA. Worth checking with `openssl verify`, not just certificate dates.
+* `kubeProxyReplacement: true` is necessary but not sufficient. Fully removing kube-proxy also requires `k8sServiceHost`/`k8sServicePort`, otherwise Cilium's own control components can't reach the API server to bootstrap themselves.
+* Started tracking working Helm values in git as a lightweight, pre-GitOps discipline.
+
+## Next
+
+Deploying `kube-prometheus-stack` (Prometheus Operator + Grafana) as the next addition, configuring it independently.
