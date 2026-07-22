@@ -64,6 +64,13 @@ resource "aws_vpc_security_group_ingress_rule" "allow_ssh" {
   ip_protocol       = "tcp"
   to_port           = 22
 }
+resource "aws_vpc_security_group_ingress_rule" "allow_http" {
+  security_group_id = aws_security_group.kubing.id
+  cidr_ipv4         = var.admin_cidr
+  from_port         = 32080
+  ip_protocol       = "tcp"
+  to_port           = 32080
+}
 
 resource "aws_vpc_security_group_ingress_rule" "allow_internal" {
   security_group_id            = aws_security_group.kubing.id

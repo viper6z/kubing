@@ -1,0 +1,30 @@
+# 1. Prometheus EBS Storage Override
+prometheus:
+  prometheusSpec:
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ebs-gp3-retain  # Change to your AWS EBS storage class name
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 5Gi
+
+# 2. Grafana Storage and Access Override
+grafana:
+  persistence:
+    enabled: true
+    storageClassName: ebs-gp3-retain
+    size: 5Gi
+  service:
+    type: NodePort
+    nodePort: 30000
+
+# 3. Kubeadm Exclusions Override
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+

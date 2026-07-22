@@ -1,0 +1,53 @@
+# Cilium Helm values — homelab kubeadm cluster on AWS EC2
+# Chart: cilium/cilium
+# Chart version: 1.19.6
+#
+# Applied with:
+#   helm upgrade cilium cilium/cilium \
+#     --namespace kube-system \
+#     --version 1.19.6 \
+#     -f values.yaml
+#
+# This file should always match what's actually running. Check for drift with:
+#   helm get values cilium -n kube-system -a > /tmp/live-values.yaml
+#   diff /tmp/live-values.yaml values.yaml
+
+# Pod networking. Cilium allocates /24s per node out of this pool.
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 172.20.0.0/16
+    clusterPoolIPv4MaskSize: 24
+
+# Full kube-proxy replacement. kube-proxy's DaemonSet and ConfigMap have been
+# removed from the cluster entirely — Cilium's eBPF datapath is the only thing
+# programming Service routing (ClusterIP/NodePort/etc). Do not re-enable
+# kube-proxy alongside this; running both at once causes conflicting NAT rules
+# and breaks Service routing cluster-wide (this took down CoreDNS once already).
+kubeProxyReplacement: true
+
+# Required as a companion to the above. Once kube-proxy is gone, nothing else
+# programs the route to the API server's own ClusterIP, so Cilium needs the
+# control-plane's real address directly to avoid a chicken-and-egg problem on
+# agent startup.
+k8sServiceHost: 10.42.1.204   # control-plane node private IP
+k8sServicePort: 6443
+
+# Enables the Envoy-based L7 proxy. Required by the Ingress controller below.
+l7Proxy: true
+
+ingressController:
+  enabled: true
+  default: true          # makes "cilium" the default IngressClass
+  # "shared": every Ingress object attaches to one shared listener (below).
+  # The default ("dedicated") mode ignores hostNetwork.sharedListenerPort
+  # entirely and expects a per-Ingress LoadBalancer Service instead, which is
+  # the root cause of the original "nothing listening on the port" issue.
+  loadbalancerMode: shared
+  hostNetwork:
+    enabled: true
+    sharedListenerPort: 32080   # exposed on every node's real interface
+
+envoy:
+  enabled: true

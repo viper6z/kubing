@@ -1,0 +1,17 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: freshrss-ingress
+  namespace: freshrss
+spec:
+  ingressClassName: cilium
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: freshrss
+            port:
+              number: 80
