@@ -1,30 +1,117 @@
-# 1. Prometheus EBS Storage Override
+# kube-prometheus-stack — fill-in skeleton
+#
+# Structure is correct (field names, nesting) so the chart will accept it once
+# filled in. Values are intentionally blank. Some blanks have one real right
+# answer you can verify against something you already know or built tonight,
+# marked [FACT]. Others are genuine judgment calls with no single correct
+# answer, marked [JUDGMENT]. Different mental process for each, don't try to
+# "look up" the judgment ones the same way you'd verify the fact ones.
+#
+# Reference: https://github.com/prometheus-community/helm-charts/blob/main/charts/kube-prometheus-stack/README.md
+# Full field list: https://github.com/prometheus-community/helm-charts/blob/main/charts/kube-prometheus-stack/values.yaml
+
 prometheus:
   prometheusSpec:
+    retention: 7d
+    # [JUDGMENT] How many days of metrics do you actually want queryable
+    # before they age out? More days = more disk used. There's no universal
+    # right number, decide based on the storage size you pick below, not
+    # the other way around.
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        memory: 512Mi
+    # [JUDGMENT] You're on t3.small nodes. Prometheus + its operator +
+    # kube-state-metrics + node-exporter is a heavier install than anything
+    # you've run so far. Worth checking `kubectl describe node` for available
+    # allocatable resources before guessing, not just picking a number.
+
     storageSpec:
       volumeClaimTemplate:
         spec:
-          storageClassName: ebs-gp3-retain  # Change to your AWS EBS storage class name
+          storageClassName: ebs-gp3-retain
+          # [FACT] You already created this StorageClass for FreshRSS/Postgres.
+          # `kubectl get storageclass` will remind you, don't guess the name.
           accessModes: ["ReadWriteOnce"]
           resources:
             requests:
-              storage: 5Gi
+              storage: 2Gi
+              # [JUDGMENT] Depends on retention above, plus how many things
+              # you're scraping. Start conservative, you can expand later,
+              # remember from tonight: check if your StorageClass actually
+              # allows volume expansion before assuming you can resize live.
 
-# 2. Grafana Storage and Access Override
+  ingress:
+    enabled: true
+    ingressClassName: cilium
+    # [FACT] What did you set on the FreshRSS Ingress a few sessions ago?
+    hosts:
+      - home.prometheus
+      # [JUDGMENT] Needs to actually resolve from your laptop. What
+      # mechanism did you use to make "grafana" resolve, /etc/hosts entry
+      # or Tailscale MagicDNS? Same mechanism applies here.
+    paths:
+      - /
+      # [FACT] Check what path your FreshRSS Ingress matched, and think
+      # about whether a distinct host still needs a narrower path or not.
+    pathType: Prefix
+    # [FACT] Same field existed on your FreshRSS Ingress. What value did
+    # you use there, and does the same reasoning apply here?
+
 grafana:
   persistence:
     enabled: true
     storageClassName: ebs-gp3-retain
-    size: 5Gi
-  service:
-    type: NodePort
-    nodePort: 30000
+    # [FACT] Same StorageClass question as Prometheus above.
+    size: 500Mi
+    # [JUDGMENT] Grafana doesn't store metrics, only dashboards/users/settings.
+    # Should this be bigger or smaller than Prometheus's volume, and why?
 
-# 3. Kubeadm Exclusions Override
-kubeControllerManager:
-  enabled: false
-kubeScheduler:
-  enabled: false
-kubeEtcd:
-  enabled: false
+  ingress:
+    enabled: true
+    ingressClassName: cilium
+    hosts:
+      - home.grafana
+    path: /
+    # [FACT, but notice something] This field is singular here, not a list
+    # like Prometheus's `paths` above. Why might that be, given Grafana is
+    # a completely different Helm subchart than Prometheus/Alertmanager?
+    pathType: Prefix
+
+alertmanager:
+  ingress:
+    enabled: false
+    # [JUDGMENT] Think back to the earlier conversation: do you actually
+    # need to browse Alertmanager's own web UI, or will you interact with
+    # alerts through Grafana and Discord instead? A real "maybe not" is a
+    # valid answer here.
+    ingressClassName:
+    hosts:
+    paths:
+    pathType:
+
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ebs-gp3-retain
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 256Mi
+              # [JUDGMENT] Alertmanager stores very little, just silence and
+              # notification state, not metrics. Compare this reasoning to
+              # the much bigger decision you made for Prometheus's volume.
+
+  config:
+    route:
+      receiver: 'discord'
+      group_by: ['alertname', 'namespace']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+
 
