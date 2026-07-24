@@ -501,3 +501,41 @@ Checked the working Cilium Helm values into git as `values.yaml` plus a `README.
 ## Next
 
 Deploying `kube-prometheus-stack` (Prometheus Operator + Grafana) as the next addition, configuring it independently.
+
+# Logbook, 2026-07-24: Control plane anatomy and the controller pattern
+
+A theory session rather than cluster work. Went through phase 1 of a structured Kubernetes curriculum: control plane internals and the reconciliation model everything else is built on. No changes to the cluster beyond read-only inspection. Cluster is `v1.36.2`, containerd `2.2.6`.
+
+## What I worked through
+
+Traced the full path from `kubectl apply -f deployment.yaml` to a running container, naming every component and handoff. The thing that reframed my whole mental model: `apply` only means validate + persist to etcd + return 201. Nothing is running at that point. Everything after is asynchronous reconciliation, and if the scheduler were down the Deployment would just sit in etcd forever while `apply` still reported success.
+
+Nailed down the request path through the API server before persistence: authentication → authorization → admission → validation → persist. The API server is the only writer to etcd; nothing else in the cluster touches etcd directly. Verified this on my own control plane by grepping the static pod manifests — the scheduler manifest has no etcd connection at all.
+
+Watches vs. polling. Controllers don't poll the API server, they open a long-lived watch and get pushed events. Reconnect after a drop uses `resourceVersion=N` to replay from where you left off, with a full re-LIST fallback if etcd has compacted past that point (`410 Gone`). This is the concrete difference from how Seal works — Seal polls Git on a timer.
+
+Level-triggered vs. edge-triggered, and where Seal sits. A Kubernetes controller acts on *what is* (observed state), not *what changed* (the event), so dropped or duplicate events don't matter — it re-reads reality and reconciles. Seal is level-triggered on its input (reads HEAD, not a queue of commits) but it compares against a last-applied SHA instead of observed reality, so it can't detect drift. If someone `docker stop`s a container or hand-edits an nginx conf, Seal does nothing until the next commit. A controller catches it because it never trusts a record of its own past actions. Noted the hardening path: compare against `docker ps` + file checksums instead of the SHA.
+
+The Deployment → ReplicaSet → Pod chain, verified on FreshRSS. ownerReferences store the lineage as explicit UID pointers on each object (confirmed the Pod's owner UID equals the RS's own UID), so ownership survives a full control plane restart because it lives in the data. The RS selector is the pod template's labels plus `pod-template-hash`, and that hash is a content hash of `spec.template` — same idea as a commit SHA. It's what stops my three FreshRSS ReplicaSets from fighting over the same pods. Rule for what triggers a new RS: does the change require the pods to be rebuilt to take effect? If yes it's in the template → new RS (image, memory limit, env). If no (replicas, revisionHistoryLimit) → same RS.
+
+Scheduler does exactly one thing: picks a feasible, highest-scoring node and writes a Binding (`spec.nodeName`). It never contacts the node or starts anything. Setting `nodeName` is precisely what makes the pod match the target kubelet's watch filter — that's the handoff.
+
+Kubelet as the node-level reconciler. Watches for pods where `spec.nodeName == me`, drives containerd over CRI to pull images and start containers (containerd → runc does the actual work, kubelet never runs a container itself), then reports status back up to the API server. Desired state down, observed state up. It's the only component that writes real pod status, which is why `kubectl get pods` output ultimately comes from the kubelet, indirectly. Also runs probes itself as a continuous per-container loop.
+
+CRDs and operators as the extension mechanism. A CRD teaches the API server a new object type; an operator is just a controller that watches that type and reconciles it, scoped by RBAC on its ServiceAccount and enforced by the API server on every call. Operators compose the built-in machinery — a Postgres operator creates a StatefulSet, and the normal chain takes over — rather than creating pods directly. Inventoried my own cluster's CRDs (`kubectl get crds`): all Cilium. Sorted them into human-authored desired state (`CiliumNetworkPolicy`) vs. operator-populated observed state (`CiliumEndpoint`, `CiliumNode`) — not every CRD is a thing you write.
+
+Static pods and the bootstrap problem. The control plane (apiserver, etcd, scheduler, controller-manager) runs as static pods the kubelet reads straight off disk from `/etc/kubernetes/manifests/`, with no API server or scheduler involved — which is the only way to resolve the chicken-and-egg of the API server needing to already be running. kubeadm *wrote* those manifests once at bootstrap; the kubelet *runs and restarts* them forever after. The kubelet is both the last component in the apply narrative and the first one at boot.
+
+## Key Takeaways
+
+* `apply` = accepted intent, persisted to etcd. Not running. Everything after is async reconciliation.
+* Nothing but the API server touches etcd. Every other component talks only to the API server.
+* Controllers are level-triggered: they act on observed state, not on the event, which is why the watch stream can be treated as unreliable. This is the specific thing Seal's SHA-comparison design gets wrong for drift.
+* ownerReferences are UID pointers stored on the objects, so the DAG survives a control plane restart.
+* The scheduler only writes a Binding. The kubelet only reconciles its own node's pods and reports status up. Each component owns one narrow slice.
+* An operator is a controller for a custom type, bounded by RBAC, that composes built-in objects rather than bypassing them.
+* The control plane node is tainted `NoSchedule` (keeps workloads off) but still runs a kubelet, because static pods bypass the scheduler entirely.
+
+## Next
+
+Phase 2 of the curriculum. Also worth confirming on the cluster: whether `prometheus-operator`'s CRDs (`servicemonitors` etc.) are actually installed, since the kube-prometheus-stack is only partially deployed — `kubectl get servicemonitors` erroring would explain gaps in the monitoring setup.
