@@ -539,3 +539,37 @@ Static pods and the bootstrap problem. The control plane (apiserver, etcd, sched
 ## Next
 
 Phase 2 of the curriculum. Also worth confirming on the cluster: whether `prometheus-operator`'s CRDs (`servicemonitors` etc.) are actually installed, since the kube-prometheus-stack is only partially deployed — `kubectl get servicemonitors` erroring would explain gaps in the monitoring setup.
+
+## 2026-07-25 / 26 — Phase 2: Cilium networking
+
+Worked through Kubernetes networking with Cilium as the concrete
+implementation. Confirmed the cluster runs tunnel mode over VXLAN
+(port 8472) with kube-proxy replacement, both verified from live
+config rather than assumed.
+
+Covered: what the CNI spec actually contracts for vs. what Cilium
+adds; encapsulation and its MTU cost; the pod CIDR / service CIDR
+split; ClusterIP translation at the socket via eBPF and why no
+reverse translation is needed; NodePort and why type=LoadBalancer
+stays <pending> without a cloud controller; cluster DNS, search
+domains and the ndots:5 cost; NetworkPolicy semantics; ingress.
+
+Experiments on the live cluster:
+- Killed the Cilium agent under load. Traffic kept flowing — eBPF
+  programs and maps are kernel state, not agent state. New pods
+  couldn't be scheduled at all (node tainted NotReady).
+- Measured the ndots cost in Hubble: one github.com lookup produced
+  five DNS queries, four of them guaranteed NXDOMAIN.
+- Wrote a NetworkPolicy restricting Postgres ingress to FreshRSS,
+  predicted four outcomes, verified all four. Proved enforcement
+  runs on label-derived identity by giving a netshoot pod the
+  FreshRSS label and watching it get through.
+
+Real incident, unplanned: FreshRSS wouldn't start. Traced it from
+a failed EBS volume attach → CSI driver DNS timeouts → ~50% of DNS
+queries failing → one CoreDNS replica unreachable → the control
+plane node advertising its Tailscale address instead of its VPC
+address. Two independent interface heuristics had both picked
+tailscale0 — the kubelet's node IP and Cilium's device detection.
+Fixed both (--node-ip in /etc/default/kubelet, devices='{ens+}'
+via Helm). Also corrected MTU 1280 → 9001 on that node.
