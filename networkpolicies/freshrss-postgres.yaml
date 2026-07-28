@@ -10,12 +10,15 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-  - from:
-    - podSelector:
-        matchLabels:
-          app: freshrss
-    ports:
-    - protocol: TCP
-      port: 5432
+    - from:
+      - podSelector:
+          matchLabels:
+            app: freshrss
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/instance: pgexporter
+      ports:
+      - protocol: TCP
+        port: 5432
 
 
