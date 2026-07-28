@@ -621,3 +621,162 @@ all three look like data loss and arent:
 ## next
 
 phase 4, prometheus. applies this phases storage stuff to its own retention config.
+
+# Logbook, 2026-07-28, Phase 4: Monitoring
+
+Deployed kube-prometheus-stack, fixed control-plane scrape failures, added Postgres monitoring.
+
+---
+
+## Concepts
+
+**Prometheus pulls, it doesn't receive.** It sends HTTP GETs to `/metrics` endpoints on a schedule. Nothing pushes to it. Metrics live in the process that produced them and travel by plain HTTP.
+
+**Two ways a thing exposes metrics:**
+- *Instrumented*: the app serves `/metrics` itself via a Prometheus client library. Cilium, kube-apiserver, controller-manager.
+- *Exporter*: a separate process translating for something that doesn't speak Prometheus. `postgres_exporter` connects to Postgres as a normal SQL client, queries the stats views, serves the results as metrics.
+
+**Service discovery.** Pod IPs aren't stable, so Prometheus can't hold a static address list. It watches the API server for EndpointSlices, which are the live list of pod IPs behind a Service, and scrapes each pod directly. It does *not* scrape the Service's ClusterIP, because that load-balances and you'd get one pod at random per scrape instead of all of them separately.
+
+**ServiceMonitor to scrape, the full pipeline:**
+1. ServiceMonitor (a CRD) declares: these Services, by label, this named port, this interval
+2. Prometheus Operator watches the API server for ServiceMonitors
+3. On change, operator regenerates Prometheus's config file and triggers a reload
+4. Prometheus resolves that config into concrete addresses via EndpointSlice discovery
+5. Prometheus GETs each address on the scrape interval
+
+**Two independent watches, and they fail differently:**
+- The *operator* watches ServiceMonitors and builds config. Broken here means the target pool is absent entirely.
+- *Prometheus* watches Services and EndpointSlices to resolve addresses. Broken here means the pool exists but is empty, or targets are DOWN.
+
+Scaling a Deployment doesn't touch the operator at all. The config already says "endpointslices matching X", only the resolution changes.
+
+**`up`** is a metric Prometheus synthesises per target: 1 if the scrape succeeded, 0 if not. Health alerts are built on it, which means a failed scrape makes a component look dead even when it's fine.
+
+**Binding.** A listening socket has an address as well as a port. `127.0.0.1` means loopback only, and loopback is *per network namespace*, so a pod's localhost is its own, not the node's. `0.0.0.0` means all interfaces.
+
+**Refused vs timed out**, worth internalising:
+- *connection refused*: packet arrived, nothing listening on that interface and port, kernel rejected it
+- *connection timed out*: packet vanished. Dropped by NetworkPolicy, or a ClusterIP with no backends
+
+---
+
+## What I did
+
+### Installed the stack
+
+```bash
+helm install kps prometheus-community/kube-prometheus-stack \
+  --version 87.21.0 \
+  --namespace monitoring --create-namespace \
+  -f values.yaml -f values-secrets.yaml
+```
+
+Chart 87.21.0, appVersion v0.92.1, which is the **operator** version, not Prometheus. Prometheus's own version is set separately by an image tag.
+
+### Alertmanager: the `null` receiver
+
+Supplied my own `alertmanager.config` with a Discord receiver. Broke the config, because:
+
+**Helm merge rules: maps merge key by key, lists replace wholesale.**
+
+- `receivers` is a list, so mine replaced the chart's, deleting the `null` receiver
+- `route` is a map, so it merged, and the chart's `routes` sub-route survived, still pointing at `null`
+- Result: a route referencing a receiver that no longer exists, so Alertmanager rejects the config
+
+Fix: include `- name: 'null'` in my own receivers list. **If you override a list in Helm values, you own the entire list.**
+
+`null` is a receiver with no delivery config, a black hole. It exists to swallow **Watchdog**, an alert designed to fire permanently as a heartbeat. The intended use is routing it to an external dead-man's-switch service so a dead alerting pipeline shows up as "the heartbeat stopped" rather than as silence.
+
+### Control-plane targets: connection refused
+
+etcd, kube-scheduler, kube-controller-manager all DOWN with connection refused. kubeadm binds their metrics listeners to `127.0.0.1` by default, so they're unreachable from the pod network. The etcd one also fired a false `etcdInsufficientMembers` alert, because the rule counts `up{job=~".*etcd.*"} == 1` and reads a failed scrape as a dead member.
+
+Fixed in `/etc/kubernetes/manifests/`:
+- `kube-controller-manager.yaml`: `--bind-address=0.0.0.0`
+- `kube-scheduler.yaml`: `--bind-address=0.0.0.0`
+- `etcd.yaml`: `--listen-metrics-urls=http://0.0.0.0:2381` (**only** the metrics URL, client and peer URLs left alone)
+
+These are **static pods**. Kubelet watches that directory and restarts the pod on file change, so saving the file *is* the deploy. Back the files up outside that directory first, because a typo takes the component down. `kubectl` hung for roughly 30 seconds while etcd restarted, which is expected: no etcd, no API server reads.
+
+Verified at the socket level rather than trusting the UI:
+```bash
+sudo ss -tlnp | grep -E '10257|10259|2381'   # want *: not 127.0.0.1:
+```
+
+⚠️ **These edits don't survive `kubeadm upgrade`.** It regenerates static pod manifests from the `kubeadm-config` ConfigMap in `kube-system`. For durability, put the args under `controllerManager.extraArgs`, `scheduler.extraArgs`, and `etcd.local.extraArgs` there.
+
+### kube-proxy: empty target pool
+
+`0/0 up`, a different failure. Nothing DOWN because nothing was discovered. Cilium runs in kube-proxy-replacement mode so the DaemonSet doesn't exist, and the chart ships the ServiceMonitor regardless. Set `kubeProxy: enabled: false`.
+
+### Postgres exporter
+
+Installed `prometheus-postgres-exporter` 8.2.0 into `freshrss`.
+
+Values that mattered:
+- `config.datasource.host` and `user` are plain strings. `passwordSecret: {name, key}` points at the existing `db-secret`. The chart offers several alternatives for the same value (`password`, `passwordFile`, `passwordSecret`), so fill exactly one.
+- `serviceMonitor.enabled: true`
+- `serviceMonitor.labels.release: kps`, **the important one**
+
+**The selector gotcha:** my Prometheus has `serviceMonitorSelector: matchLabels: {release: kps}`. Any ServiceMonitor without that label is invisible. No error appears anywhere, the target just never shows up. (`serviceMonitorNamespaceSelector: {}` means all namespaces, so cross-namespace was never the issue.)
+
+### NetworkPolicy blocking the exporter
+
+Target green but scrapes timing out. Exporter logs showed `dial tcp 10.111.238.133:5432: connect: connection timed out`, so DNS resolved but TCP never connected.
+
+Cause: an existing NetworkPolicy on Postgres allowing ingress *only* from `app: freshrss`. **Once a policy selects a pod, that pod is default-deny for the covered direction.** FreshRSS kept working because it matches, and the exporter was dropped silently. Namespaces are not a network boundary, so being in the same namespace bought nothing: NetworkPolicy matches on labels.
+
+Fix, adding a second `podSelector` as a separate list item under `from`. Separate items mean OR, nested under one item would mean AND.
+
+```yaml
+  ingress:
+    - from:
+      - podSelector:
+          matchLabels:
+            app: freshrss
+      - podSelector:
+          matchLabels:
+            app.kubernetes.io/instance: pgexporter
+      ports:
+      - protocol: TCP
+        port: 5432
+```
+
+**Two different health signals, one per hop:**
+- `up`: Prometheus reached the exporter
+- `pg_up`: the exporter reached Postgres
+
+A green target with `pg_up == 0` means the exporter is fine and the database isn't. Each layer's health metric only covers its own hop.
+
+---
+
+## Commands worth keeping
+
+```bash
+# what's listening, and on which interface
+sudo ss -tlnp | grep <port>
+
+# does my Prometheus require a label on ServiceMonitors?
+kubectl get prometheus -n monitoring -o yaml | grep -A5 serviceMonitorSelector
+
+# the live pod list behind a Service
+kubectl get endpointslices -n <ns>
+
+# reach a UI without ingress (bypasses Services and NetworkPolicy entirely)
+kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-prometheus 9090
+```
+
+Prometheus UI: **Status → Targets**, **Status → Configuration** (generated config), **Status → Service Discovery** (discovered before filtering).
+
+---
+
+## Open items
+
+- [ ] `retentionSize` alongside `retention`, since a time bound alone won't stop the PVC filling first
+- [ ] NetworkPolicy change is applied to the cluster, but is it committed to the repo?
+- [ ] `kubeProxy: enabled: false` needs a `helm upgrade` to take effect
+- [ ] PromQL: `rate()`, `sum by`, `histogram_quantile`, the real remaining gap
+- [ ] One PrometheusRule I wrote myself, e.g. `pg_up == 0`, or connections approaching `max_connections`
+- [ ] A Grafana panel I'd actually open
+- [ ] Record the static-pod arg change in `kubeadm-config` so it survives upgrades
