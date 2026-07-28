@@ -323,3 +323,133 @@ hubble observe -P --verdict DROPPED --follow
 - `nodePort.addresses` not set — Cilium may still pick oddly for NodePort on multi-address nodes.
 - Envoy's `policy-verdict:none TRAFFIC_DIRECTION_UNKNOWN` line — need to check 1.19 Hubble docs for what the match-type values mean.
 - Gateway API — awareness only, out of scope this phase.
+
+# Phase 3: storage, CSI, and stateful workloads
+
+## 1. Why CSI exists
+
+Storage drivers used to live inside the Kubernetes source tree: the AWS EBS driver, the GCE PD driver, Ceph, all of it compiled into kubelet and controller-manager. "In-tree."
+
+That meant:
+
+- A bug in the EBS driver got fixed on Kubernetes' release schedule, not AWS's. You waited for a minor release.
+- Every cluster shipped every vendor's driver whether you used it or not. Bloat, and a bigger attack surface.
+- Vendor code ran inside core Kubernetes components. A bad driver could take down kubelet.
+- Adding support for new storage meant getting a PR merged into Kubernetes itself.
+
+## 2. CSI architecture: two workloads
+
+**controller Deployment**: one pod, runs anywhere. Contains `ebs-plugin` (the driver, holds AWS creds) plus sidecars: `csi-provisioner`, `csi-attacher`, `csi-resizer`, `livenessprobe`. `csi-snapshotter` is a fifth, not installed on mine.
+
+Sidecars are generic k8s code, same on every cloud. Each watches one API object type and calls gRPC on the driver container next to it. Only the driver knows what EBS is. Swap the driver, keep the sidecars.
+
+**node DaemonSet (`ebs-csi-node`)**: one pod per node, privileged, host filesystem mounted in. Same image, different role. Exists because `mkfs` and `mount` are kernel operations on a specific machine, and there's no remote version. The controller can be anywhere because everything it does is an API call to AWS.
+
+kubelet calls the node plugin directly over a local unix socket, no sidecar, because both are already on the machine. Two calls: `NodeStageVolume` (format if blank, mount to a staging path) then `NodePublishVolume` (bind-mount into the pod's directory).
+
+## 3. PV, PVC, StorageClass
+
+**StorageClass**: a template, created by you (or a Helm chart), once. It names the driver, the parameters, the reclaim policy, the binding mode. Mine is `ebs-gp3-retain`. It doesn't represent any actual storage; it's instructions for how to make some.
+
+**PVC**: a request, created by you, per workload. "I want 20Gi, RWO, from this class." It's the only storage object an application author should have to write. Deliberately ignorant of EBS.
+
+**PV**: the actual thing. Cluster-scoped, created by the provisioner in dynamic provisioning, and it holds the EBS volume ID. This is where the abstraction stops and AWS starts.
+
+**Binding** is the PV controller matching a Pending PVC to a suitable PV (right size, right access mode, right class) and writing the reference into both. Exclusive and permanent: one PV to one PVC, and it doesn't get reused for something else while bound.
+
+## 4. Dynamic provisioning, end to end
+
+```
+scheduling → PVC → provisioner → CreateVolume → PV → binding →
+VolumeAttachment → attacher → AttachVolume → kubelet → node plugin → mount
+```
+
+PVC gets created. If it's `WaitForFirstConsumer` it sits Pending until a pod gets scheduled on a node by kube-scheduler. csi-provisioner watches for PVCs with a StorageClass whose provisioner is `ebs.csi.aws.com`. It makes a gRPC call `CreateVolume` to the driver pod that talks to the AWS API and makes the volume exist in AWS. csi-provisioner creates a PersistentVolume object in etcd through the API server. The PV controller inside kube-controller-manager has a watch for this and creates the PVC to PV binding.
+
+Then AttachDetach controller sees a pod scheduled with a bound PVC on a node. It creates a VolumeAttachment object naming the volume and the node. csi-attacher watches VolumeAttachments, sees the new one, and makes a gRPC call to the driver, and the driver calls the AWS API to attach the volume to the right node. It marks the VolumeAttachment `attached: true`, which kubelet on the node watches for, and calls the node plugin that formats the volume if blank and bind mounts to the pod's directory.
+
+## 5. The EBS topology trap
+
+If you have a multi-AZ cluster and put `volumeBindingMode: Immediate` on the StorageClass, that can bite you, because the EBS volume gets created before a node has been scheduled for the pod, meaning now only nodes from that AZ can get assigned the pod from the scheduler.
+
+## 6. Access modes
+
+RWO counts nodes, not pods. Two pods on the same node can both mount it; two pods on different nodes cannot.
+
+RWX is not supported on EBS. If you want a volume server thing that all nodes can reach, that's EFS.
+
+## 7. Reclaim policies, expansion, snapshots
+
+### Reclaim policies
+
+**Retain**: when the PVC is deleted the PV remains and goes to `Released`. Released PVs cannot be bound, because the old PVC's identity is still stamped on the PV in `claimRef`. To reuse: patch `claimRef` to null, PV goes `Available`. Deleting the PV object does NOT delete the EBS volume under Retain; it just loses your only record of the volume ID. Orphaned volumes keep billing and nothing in the cluster tells you.
+
+**Delete**: deletes the PV and the storage asset on the external infra.
+
+### Expansion
+
+If `allowVolumeExpansion` is set to true you can edit the PVC to specify a larger size and the PV will be resized.
+
+### Snapshots
+
+It's a CRD. Needs the snapshot controller and the `csi-snapshotter` sidecar for the driver.
+
+As part of the deployment process of VolumeSnapshot, the Kubernetes team provides a snapshot controller to be deployed into the control plane, and a sidecar helper container called `csi-snapshotter` to be deployed together with the CSI driver. The snapshot controller watches VolumeSnapshot and VolumeSnapshotContent objects and is responsible for the creation and deletion of VolumeSnapshotContent objects. The sidecar `csi-snapshotter` watches VolumeSnapshotContent objects and triggers CreateSnapshot and DeleteSnapshot operations against a CSI endpoint.
+
+## 8. Node failure semantics
+
+| Time | What happens |
+|---|---|
+| 0s | node dies, heartbeats stop |
+| ~40s | node controller marks it `NotReady`, adds the unreachable taint |
+| ~5min later | taint toleration expires, pods get a `deletionTimestamp` |
+| | pods enter `Terminating` and stay there, because no kubelet can confirm they stopped |
+| | meanwhile the Deployment/StatefulSet sees the count drop and schedules replacements elsewhere |
+| ~6min after detach requested | volume force-detaches, replacement pod can mount |
+
+## 9. StatefulSet vs Deployment + PVC
+
+### Deployment + PVC
+
+- A Deployment has one pod template with one `volumes` section. Every replica references the same PVC, so 2 or more replicas need to be on the same node, or if pods land on another node we get a multi-attach error.
+- When you do `RollingUpdate`, you try to bring up the new pod then terminate the old one, but in this instance it will cause a deadlock, because the new pod can't access the same volume as the old one, and the old one won't terminate until the new one is ready, which it won't be as long as it can't attach. The fix is `strategy: Recreate`, which will accept downtime and kill the old pod first, before starting the new one.
+
+### StatefulSet
+
+- Pods get stable identity, like `postgres-0` and `postgres-1`. The name survives rescheduling. A StatefulSet creates 1 PVC per replica so each pod owns its own volume permanently, so no fighting for disk. PVCs outlive the pods, so when `postgres-0` gets recreated the PVC will remain for it.
+
+### volumeClaimTemplates naming
+
+`volumeClaimTemplates` generate PVC names as `<template-name>-<sts-name>-<ordinal>`. Template `data` + sts `postgres` gives `data-postgres-0`.
+
+Adoption is pure string matching. If a PVC already exists at that name the StatefulSet uses it, otherwise it creates one. That's the whole mechanism for reconnecting a StatefulSet to existing data: pre-create a PVC at the generated name with `volumeName` pointing at the PV.
+
+Three places must agree: volumeClaimTemplate name, volumeMount name, and the prefix on the pre-created PVC.
+
+### Migration log: postgres from Deployment to StatefulSet
+
+```
+vol-014e28c1ea9d62ddf
+pvc-65109b10-e472-447c-b4f3-feefc4d38ce4  →  vol-014e28c1ea9d62ddf  (5Gi)
+```
+
+```bash
+kubectl scale deploy postgres -n freshrss --replicas=0
+# delete two orphan volumes in EBS, then delete their PVs in kubectl
+kubectl delete pvc postgres-data -n freshrss
+kubectl patch pv pvc-65109b10-e472-447c-b4f3-feefc4d38ce4 -p '{"spec":{"claimRef":null}}'
+```
+
+## 10. In-cluster Postgres vs RDS
+
+RDS premium (~2-3x raw EC2) buys: automated backups + PITR, minor version patching, Multi-AZ failover in ~1 min with committed transactions intact, metrics, storage autoscaling. None are hard individually, but all have to be built, kept working, and tested.
+
+Give up: superuser, extensions outside AWS's allowlist, upgrade timing, lock-in.
+
+My current setup for comparison: no replication, no WAL archiving, no backups, ~6 min recovery from node failure.
+
+Third option, and naming it matters: an operator (CloudNativePG, Zalando) closes most of the gap with replication, failover, S3 backup, and PITR, as a controller doing reconciliation. "StatefulSet vs RDS" is a false binary.
+
+**RDS when**: small team, no DBA, db is system of record.
+
+**In-cluster when**: many databases so the premium compounds, need blocked extensions, multi-cloud, or dev/test where failure cost is near zero.

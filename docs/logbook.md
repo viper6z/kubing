@@ -573,3 +573,51 @@ address. Two independent interface heuristics had both picked
 tailscale0 — the kubelet's node IP and Cilium's device detection.
 Fixed both (--node-ip in /etc/default/kubelet, devices='{ens+}'
 via Helm). Also corrected MTU 1280 → 9001 on that node.
+
+# 2026-07-28 - csi, storage, moved postgres to statefulset
+
+cluster: kubeadm on ec2, 3 nodes, single az (eun1-az1), cilium
+driver: aws-ebs-csi-driver v1.62.0
+
+## what i did
+
+went through the whole storage layer. csi architecture, pv/pvc/storageclass, dynamic provisioning, the az trap, access modes, reclaim policies, node failure, statefulsets. then audited my own postgres and migrated it.
+
+## what the audit found
+
+**postgres was a deployment with rollingupdate on an rwo volume.** thats a deadlock waiting for my next apply that touches the pod spec. new pod cant attach while the old one holds the volume, deployment wont kill the old one until the new one is ready. never fired because the pod had only ever been recreated, never rolled.
+
+**two orphaned ebs volumes.** retain kept the pvs from two failed setup attempts on 07-20, 17:39 and 18:02, the 18:10 one is the real one. both released in k8s, available in ec2, 5gib each, just billing. nothing in the cluster tells you. and deleting the pv wouldnt have deleted the volume, would just have lost the volume id.
+
+**single az confirmed from the aws side.** everything in eun1-az1. so waitforfirstconsumer has never actually done anything for me. it starts mattering when i add a node in another az.
+
+## the migration
+
+did the full static pv reconnection instead of just letting it make a new volume, because thats the procedure you actually need on data you cant lose.
+
+1. wrote down the handle first: pvc-65109b10-e472-447c-b4f3-feefc4d38ce4 -> vol-014e28c1ea9d62ddf (5gi)
+2. scaled deployment to 0, waited for the volumeattachment to disappear, not just the pod
+3. deleted the pvc, patched claimref to null so the pv went available
+4. pre-created a pvc named data-postgres-0 (what the volumeclaimtemplate generates) with volumename pinned to the pv
+5. wrote the statefulset with a matching volumeclaimtemplate, put the pvc above it in the manifest so apply order cant race
+6. applied
+
+pod came up as postgres-0, running in 13s. data-postgres-0 bound to pvc-65109b10, not a new pv. data intact.
+
+## things that wouldve silently broken it
+
+all three look like data loss and arent:
+
+- dropping PGDATA=/var/lib/postgresql/data/pgdata. postgres finds the mount root instead of the data dir and runs initdb into a fresh cluster next to the real one. everything comes up healthy, no feeds.
+- changing the pod label off app.kubernetes.io/name: postgres. the service selects on it so freshrss loses its backend. thats dns not data.
+- pvc name mismatch. adoption is pure string matching so it just provisions a new empty volume and doesnt error.
+
+## gaps
+
+- **no backups.** retain covers accidental pvc deletion. does nothing for a bad migration or a dropped table which is what actually happens. pg_dump cronjob writing off cluster, ~20 min of work, should be next.
+- **no snapshots.** csi-snapshotter isnt installed so the volumesnapshot crds wont work here. lower prio than the dump, and a snapshot isnt a backup anyway, same account same region.
+- **no cloud controller manager.** nothing watches ec2 and reports instance state back, so on node failure the ~6 min force detach is the fast path and clearing it early is manual, ie me.
+
+## next
+
+phase 4, prometheus. applies this phases storage stuff to its own retention config.

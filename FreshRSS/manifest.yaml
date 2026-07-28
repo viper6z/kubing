@@ -85,19 +85,6 @@ parameters:
   type: gp3
 ---
 apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: postgres-data
-  namespace: freshrss
-spec:
-  storageClassName: "ebs-gp3-retain"
-  resources:
-    requests:
-      storage: "5Gi"
-  accessModes:
-    - "ReadWriteOnce"
----
-apiVersion: v1
 kind: Service
 metadata:
   name: postgres
@@ -110,13 +97,28 @@ spec:
       port: 5432
       targetPort: 5432
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-postgres-0
+  namespace: freshrss
+spec:
+  storageClassName: "ebs-gp3-retain"
+  volumeName: pvc-65109b10-e472-447c-b4f3-feefc4d38ce4
+  accessModes:
+    - "ReadWriteOnce"
+  resources:
+    requests:
+      storage: "5Gi"
+---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: postgres
   namespace: freshrss
 spec:
   replicas: 1
+  serviceName: "postgres"
   selector:
     matchLabels:
       app.kubernetes.io/name: postgres
@@ -125,20 +127,16 @@ spec:
       labels:
         app.kubernetes.io/name: postgres
     spec:
-      volumes:
-      - name: postgres-storage
-        persistentVolumeClaim:
-          claimName: postgres-data
       containers:
       - name: postgres
         image: postgres:15-alpine
         ports:
           - containerPort: 5432
         volumeMounts:
-          - name: postgres-storage # This must match the name below
+          - name: data
             mountPath: "/var/lib/postgresql/data"
         env:
-          - name: PGDATA  # <--- THIS IS THE MISSING KEY
+          - name: PGDATA
             value: "/var/lib/postgresql/data/pgdata"
           - name: POSTGRES_DB
             value: "freshrss"
@@ -149,4 +147,13 @@ spec:
               secretKeyRef:
                 name: db-secret
                 key: POSTGRES_PASSWORD
+  volumeClaimTemplates:
+  - metadata: 
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: "ebs-gp3-retain"
+      resources:
+        requests:
+          storage: 5Gi
 
