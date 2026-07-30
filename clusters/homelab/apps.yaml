@@ -14,4 +14,3 @@ spec:
     - name: infra-configs
   wait: true
   timeout: 5m
-  suspend: true
