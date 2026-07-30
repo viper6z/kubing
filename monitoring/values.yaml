@@ -13,6 +13,7 @@
 prometheus:
   prometheusSpec:
     retention: 7d
+    retentionSize: 1600MB
     # [JUDGMENT] How many days of metrics do you actually want queryable
     # before they age out? More days = more disk used. There's no universal
     # right number, decide based on the storage size you pick below, not

@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: postgres-rules
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: postgres
+      rules:
+        - alert: PostgresDown
+          expr: pg_up == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Postgres unreachable"
+            description: "The exporter has failed to connect for 5 minutes."

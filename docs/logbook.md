@@ -780,3 +780,70 @@ Prometheus UI: **Status → Targets**, **Status → Configuration** (generated c
 - [ ] One PrometheusRule I wrote myself, e.g. `pg_up == 0`, or connections approaching `max_connections`
 - [ ] A Grafana panel I'd actually open
 - [ ] Record the static-pod arg change in `kubeadm-config` so it survives upgrades
+
+## 2026-07-30
+- add retentionSize: 1600MB to prometheus spec, previously i just had the 7 day retention period but that doesnt limit how MUCH data can be stored in that interval
+- then upgrade my helm install of the monitoring stack
+- open port forward to grafana
+- open coredns dashboard tracking requests and stuff, then run a nslookup loop pod in the cluseter, the spike is visible in grafana but also kindof overwhelmed the node that was running the loop.
+- make 6 dashboards:
+# 1. Postgres reachable (Stat)
+
+pg_up
+
+# 2. Connections per database (Time series)
+
+pg_stat_database_numbackends
+
+# 3. Connection headroom (Gauge, unit: percent 0.0-1.0)
+
+sum(pg_stat_database_numbackends) / on() pg_settings_max_connections
+
+# 4. PVC fill (Bar gauge, unit: percent 0.0-1.0)
+
+kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes
+
+# 5. Restarts in the last 15min (Table)
+
+changes(kube_pod_container_status_restarts_total[15m]) > 1
+
+# 6. Pods not Running (Stat)
+
+sum by (namespace) (kube_pod_status_phase{phase!="Running"})
+
+
+export to json, remove id, make configmap this way:
+kubectl create configmap cluster-overview-dashboard \
+  --from-file=cluster-overview.json=cluster-overview.json \
+  --namespace monitoring \
+  --dry-run=client -o yaml > dashboard-cluster-overview.yaml
+
+then add this to metadata block: 
+metadata:
+  name: cluster-overview-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+
+then i do a rollout restart on the grafana deployment, dashboard is still there, meaning its reproducible
+
+also make this alert:
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: postgres-rules
+  namespace: monitoring
+  labels:
+    release: kps
+spec:
+  groups:
+    - name: postgres
+      rules:
+        - alert: PostgresDown
+          expr: pg_up == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Postgres unreachable"
+            description: "The exporter has failed to connect for 5 minutes."
