@@ -847,3 +847,49 @@ spec:
           annotations:
             summary: "Postgres unreachable"
             description: "The exporter has failed to connect for 5 minutes."
+
+
+## 2026-07-30
+- Do a cluster wide inventory
+
+## Deployed
+
+| Release | Namespace | Chart |
+|---|---|---|
+| `cilium` | kube-system | cilium 1.19.6, rev 20 |
+| `aws-ebs-csi-driver` | kube-system | 2.62.0 |
+| `kps` | monitoring | kube-prometheus-stack 87.21.0, rev 3 |
+| `pgexporter` | freshrss | prometheus-postgres-exporter 8.2.0 |
+
+Plus twelve hand-written objects: freshrss (Namespace, Deployment, Service,
+Ingress, PVC, StatefulSet/postgres, Service/postgres, NetworkPolicy, db-secret),
+monitoring (Namespace, dashboard ConfigMap, PrometheusRule/postgres-rules), and
+StorageClass/ebs-gp3-retain.
+
+Flux adopts Helm releases by name, so the HelmRelease must be `kps`, not
+`kube-prometheus-stack`, or it installs a second copy.
+
+## Ownership
+
+- **Flux**: the twelve objects, plus EBS driver, kps, pgexporter
+- **Ansible**: kubeadm, kubelet, Cilium, the `--bind-address=0.0.0.0` edits in
+  `/etc/kubernetes/manifests/`
+- **Terraform**: EC2, VPC, IAM, EBS volumes
+
+Cilium is out because Flux runs as pods. A bad Cilium apply kills networking and
+takes Flux with it. The EBS driver has no such problem.
+
+Order: Ansible, bootstrap, EBS driver, StorageClass, kps, then apps.
+
+## Secrets
+
+SOPS with age. Encrypt `db-secret` and the contents of `values-secrets.yaml`.
+The age key cannot live in Git, so one `kubectl create secret` before every
+bootstrap is the rebuild's only manual step. README should say so.
+
+## Loose ends
+
+- `helm get values cilium -n kube-system > cilium/values.yaml` while the cluster
+  still exists
+- Resolve `cilium/` versus `platform/cilium/`
+- etcd metrics probably not exposed, no `--bind-address` flag on etcd
