@@ -63,6 +63,8 @@ prometheus:
     # you use there, and does the same reasoning apply here?
 
 grafana:
+  deploymentStrategy:
+    type: Recreate
   persistence:
     enabled: true
     storageClassName: ebs-gp3-retain
