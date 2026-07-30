@@ -893,3 +893,13 @@ bootstrap is the rebuild's only manual step. README should say so.
   still exists
 - Resolve `cilium/` versus `platform/cilium/`
 - etcd metrics probably not exposed, no `--bind-address` flag on etcd
+flux bootstrap:
+export GITHUB_TOKEN=
+export GITHUB_USER=viper6z
+
+flux bootstrap github \
+  --owner=$GITHUB_USER \
+  --repository=kubing \
+  --branch=main \
+  --path=clusters/homelab \
+  --persona
