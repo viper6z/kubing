@@ -903,3 +903,17 @@ flux bootstrap github \
   --branch=main \
   --path=clusters/homelab \
   --persona
+
+SOPS on a public repo
+
+Got secrets into Git today. The repo is public, so the whole point was making that safe.
+
+The workflow, once you strip it down: make a keypair, write a sops config telling sops to encrypt with the public half, encrypt the secret, put the private half into the cluster so Flux can decrypt, then add a decryption block to the Kustomization pointing at it.
+
+Public key goes in Git. Private key goes in the cluster and nowhere else. Same split as an SSH keypair, which is what made it click.
+
+The nice property is that Flux does the decryption in memory at reconcile time. Plaintext never lands on disk and never goes back to Git.
+
+Two things bit me. The secret file turned out to be two YAML documents, a Namespace and the Secret, and I already had the Namespace defined elsewhere. Kustomize builds a whole directory as one set, so duplicate object identities are a hard error rather than a merge. Then sops refused to open the file to fix it, because it looks for the key at ~/.config/sops/age/keys.txt and mine was somewhere else. SOPS_AGE_KEY_FILE sorted that.
+
+Adoption was clean. The existing hand-applied Secret picked up Flux's labels and nothing restarted.
