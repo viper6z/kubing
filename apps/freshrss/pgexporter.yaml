@@ -1,0 +1,28 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: pgexporter           # release name
+  namespace: freshrss   # where the release lives
+spec:
+  interval: 30m
+  releaseName: pgexporter
+  chart:
+    spec:
+      chart: prometheus-postgres-exporter      # chart name
+      version: "8.2.0"
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+  values:
+    config:
+      datasource:
+        host: postgres
+        user: freshrss
+        passwordSecret:
+          name: db-secret
+          key: POSTGRES_PASSWORD
+    serviceMonitor:
+      enabled: true
+      labels:
+        release: kps
