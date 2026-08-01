@@ -917,3 +917,10 @@ The nice property is that Flux does the decryption in memory at reconcile time. 
 Two things bit me. The secret file turned out to be two YAML documents, a Namespace and the Secret, and I already had the Namespace defined elsewhere. Kustomize builds a whole directory as one set, so duplicate object identities are a hard error rather than a merge. Then sops refused to open the file to fix it, because it looks for the key at ~/.config/sops/age/keys.txt and mine was somewhere else. SOPS_AGE_KEY_FILE sorted that.
 
 Adoption was clean. The existing hand-applied Secret picked up Flux's labels and nothing restarted.
+
+## 2026-08-01
+Put kube-prometheus-stack under Flux management.
+
+Wrote a HelmRepository and a HelmRelease in infrastructure/controllers/, with the release name set to kps so helm-controller adopted the existing install instead of making a second one. Inlined the values, moved the Grafana password and Discord webhook into a SOPS-encrypted Secret referenced by valuesFrom.
+
+Added an infra-controllers Kustomization and chained it: controllers, then configs, then apps.
