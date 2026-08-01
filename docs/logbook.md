@@ -924,3 +924,21 @@ Put kube-prometheus-stack under Flux management.
 Wrote a HelmRepository and a HelmRelease in infrastructure/controllers/, with the release name set to kps so helm-controller adopted the existing install instead of making a second one. Inlined the values, moved the Grafana password and Discord webhook into a SOPS-encrypted Secret referenced by valuesFrom.
 
 Added an infra-controllers Kustomization and chained it: controllers, then configs, then apps.
+
+Bootstrapped Flux against clusters/homelab, moved the FreshRSS manifests into apps/, wrote the Kustomizations. Adoption was clean, only thing that changed on any object was two labels. Ran flux diff suspended first, which was worth it just for the peace of mind.
+
+Then SOPS. Keypair, .sops.yaml, encrypt, private key into the cluster by hand, decryption block on the Kustomization. Blew up first try because my old secret.yaml had a Namespace document in it and I already had namespace.yaml, and kustomize builds the whole directory as one set so duplicates are a hard error.
+
+kube-prometheus-stack was the one I was nervous about. Turned out fine. The thing that matters is releaseName, because helm looks up by name and mine was kps, not the chart name. Get that wrong and you install a second full monitoring stack next to the first. Values inlined, password and webhook in an encrypted Secret via valuesFrom. Revision 6, no pod churn except Grafana, which rolled because I fixed a storage size mismatch in the same change.
+
+pgexporter and the EBS driver after that, same pattern, no drama. Learned to trim values against helm show values instead of pasting the whole defaults file back in, which is what I'd done originally.
+
+Ordering took me three tries. dependsOn is a list, and it goes on the thing that waits, not the thing being waited for. Had a Kustomization waiting on itself for a while.
+
+Uninstalled Flux and re-bootstrapped as a test. Everything came back from Git, only manual step was recreating the age secret. So the tree is complete, which is what I wanted to know before moving on.
+
+One regression at the end: alertmanager stopped reconciling, undefined receiver "null". I'd fixed that before but lost it retyping the secrets file into the encrypted Secret. Only step today where I moved content by hand instead of git mv, and it's the only thing that broke. Noted.
+
+Repo cleanup, wrote an actual README instead of one line.
+
+Next: terraform state into S3, then the actions workflow.
