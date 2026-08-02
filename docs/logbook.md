@@ -942,3 +942,8 @@ One regression at the end: alertmanager stopped reconciling, undefined receiver 
 Repo cleanup, wrote an actual README instead of one line.
 
 Next: terraform state into S3, then the actions workflow.
+
+
+## 2026-08-02
+Short session where i made a bootstrap dir for my aws environment with terraform, ported some stuff from seal, mainly setting up the iam for the github runner role, and making some s3 buckets for state aswell as ssm file transfer.
+Also a role for my nodes to be able to use SSM and also read and write to the s3 bucket used for file transfer between ansible and ec2
